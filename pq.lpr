@@ -1,18 +1,21 @@
 program pq;
 
+{$mode delphi}{$H+}
+
 uses
+  Interfaces,
   Forms,
-  Config in 'Config.pas' {K},
-  Front in 'Front.pas' {FrontForm},
-  Main in 'Main.pas' {MainForm},
-  NewGuy in 'NewGuy.pas' {NewGuyForm},
-  Interfaces;
+  Config,
+  Front,
+  Main,
+  NewGuy;
 
 {$R *.res}
 
 begin
-  Application.Scaled:=True;
+  RequireDerivedFormResource := True;
   Application.Initialize;
+  Application.Title := 'Progress Quest';
   Application.CreateForm(TMainForm, MainForm);
   Application.CreateForm(TK, K);
   Application.CreateForm(TFrontForm, FrontForm);

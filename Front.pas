@@ -1,16 +1,15 @@
 unit Front;
 { copyright (c)2002 Eric Fredricksen all rights reserved }
 
+{$mode delphi}{$H+}
+
 interface
 
 uses
   SysUtils, Variants, Classes, Graphics, Controls, Forms, Dialogs, StdCtrls,
-  ExtCtrls, LCLIntf;
+  ExtCtrls;
 
 type
-
-  { TFrontForm }
-
   TFrontForm = class(TForm)
     Panel1: TPanel;
     Button1: TButton;
@@ -19,11 +18,10 @@ type
     Button4: TButton;
     Label2: TLabel;
     Panel2: TPanel;
+    Panel3: TPanel;
     Logo: TImage;
     Label3: TLabel;
     HomeLink: TLabel;
-    Label1: TLabel;
-    procedure FormCreate(Sender: TObject);
     procedure HomeLinkClick(Sender: TObject);
     procedure LogoClick(Sender: TObject);
   end;
@@ -33,18 +31,13 @@ var
 
 implementation
 
-uses Main;
+uses LCLIntf;
 
 {$R *.lfm}
 
 procedure TFrontForm.HomeLinkClick(Sender: TObject);
 begin
   OpenURL('http://progressquest.com/');
-end;
-
-procedure TFrontForm.FormCreate(Sender: TObject);
-begin
-
 end;
 
 procedure TFrontForm.LogoClick(Sender: TObject);

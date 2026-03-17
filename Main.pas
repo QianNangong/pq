@@ -1,23 +1,33 @@
 unit Main;
-{ copyright (c)2002 Eric Fredricksen all rights reserved }
+{ copyright (c)2022 Eric Fredricksen all rights reserved }
 
-{$mode delphi}
-
+{$UNDEF CHEATS}
 {$UNDEF LOGGING}
+{$UNDEF TURBO}
+{$mode delphi}{$H+}
 
 interface
 
 uses
   SysUtils, Variants, Classes, Graphics, Controls, Forms, Dialogs, ComCtrls,
-  StdCtrls, ExtCtrls, Buttons, ImgList, Menus;
+  StdCtrls, ExtCtrls, Buttons, ImgList, CheckLst;
 
 const
-  kFileExt = '.pq3';
+  // revs:
+  // 8: pq 6.4.1
+  // 7: pq 6.4
+  // 6: pq-web
+  // 5: pq 6.3 (no official release)
+  // 4: pq 6.2
+  // 3: pq 6.1
+  // 2: pq 6.0
+  // 1: pq 6.0, some early release I guess; don't remember
+  RevString = '&rev=8';
+  kFileExt = '.pq';
+  kSaveSignature = 'PQLAZ1';
+  kSaveVersion = 2;
 
 type
-
-  { TMainForm }
-
   TMainForm = class(TForm)
     Panel1: TPanel;
     Label1: TLabel;
@@ -29,8 +39,8 @@ type
     Stats: TListView;
     Label2: TLabel;
     PlotBar: TProgressBar;
-    Plots: TListView;
-    Quests: TListView;
+    Plots: TCheckListBox;
+    Quests: TCheckListBox;
     Panel2: TPanel;
     Label4: TLabel;
     Spells: TListView;
@@ -44,21 +54,36 @@ type
     Timer1: TTimer;
     EncumBar: TProgressBar;
     Label7: TLabel;
+    ImageList1: TImageList;
     Label8: TLabel;
+    Cheats: TPanel;
+    CashIn: TButton;
+    Button1: TButton;
+    FinishQuest: TButton;
+    Button3: TButton;
+    CheatPlot: TButton;
     vars: TPanel;
     fTask: TLabel;
     fQuest: TLabel;
     fQueue: TListBox;
     procedure GoButtonClick(Sender: TObject);
-    procedure PlotsItemChecked(Sender: TObject; Item: TListItem);
-    procedure QuestsItemChecked(Sender: TObject; Item: TListItem);
     procedure Timer1Timer(Sender: TObject);
     procedure FormCreate(Sender: TObject);
+    procedure SpeedButton1Click(Sender: TObject);
     procedure FormShow(Sender: TObject);
+    procedure Button1Click(Sender: TObject);
+    procedure CashInClick(Sender: TObject);
+    procedure FinishQuestClick(Sender: TObject);
+    procedure CheatPlotClick(Sender: TObject);
     procedure FormClose(Sender: TObject; var Action: TCloseAction);
     procedure FormKeyDown(Sender: TObject; var Key: Word;
       Shift: TShiftState);
+    procedure FormWindowStateChange(Sender: TObject);
   private
+    FUpdatingHistoryLists: Boolean;
+    FHistoryClickIndex: Integer;
+    FHistoryClickChecked: Boolean;
+    FHistoryClickList: TCheckListBox;
     procedure Task(caption: String; msec: Integer);
     procedure Dequeue;
     procedure Q(s: string);
@@ -75,9 +100,22 @@ type
     function InterestingItem: String;
     function MonsterTask(var level: Integer): String;
     function EquipPrice: Integer;
+    procedure Brag(trigger: String);
     procedure TriggerAutosizes;
     function GameSaveName: String;
+    procedure WriteSaveData(Stream: TStream);
+    procedure ReadSaveData(Stream: TStream);
+    procedure Guildify;
     procedure ClearAllSelections;
+    procedure SetHistoryEntryChecked(List: TCheckListBox; Index: Integer; IsChecked: Boolean);
+    procedure AddHistoryEntry(List: TCheckListBox; const EntryText: String; IsChecked: Boolean = False);
+    function LastHistoryEntry(List: TCheckListBox): String;
+    procedure HistoryListClickCheck(Sender: TObject);
+    procedure HistoryListMouseDown(Sender: TObject; Button: TMouseButton;
+      Shift: TShiftState; X, Y: Integer);
+    procedure RestoreIt;
+    procedure TrayIconClick(Sender: TObject);
+    function AuthenticateUrl(url: String): String;
     {$IFDEF LOGGING}
     procedure Log(line: String);
     {$ENDIF}
@@ -87,12 +125,15 @@ type
     function NamedMonster(level: Integer): String;
     function ImpressiveGuy: String;
   public
+    FTrayIcon: TTrayIcon;
+    FLastTick: QWord;
     FReportSave: Boolean;
     FLogEvents: Boolean;
     FMakeBackups: Boolean;
+    FMinToTray: Boolean;
     FExportSheets: Boolean;
     FSaveFileName: String;
-    WorkDir: String;
+    procedure MinimizeIt;
     procedure LoadGame(name: String);
     function SaveGame: Boolean;
     procedure Put(list: TListView; key: String; value: String); overload;
@@ -106,6 +147,20 @@ type
     function GetI(list: TListView; index: Integer): Integer; overload;
     function Sum(list: TListView): Integer;
     function RollCharacter: Boolean;
+    function GetMotto: String;
+    function GetPasskey: Integer;
+    procedure SetMotto(v: String);
+    procedure SetPasskey(v: String);
+    function GetHostAddr: String;
+    function GetHostName: String;
+    procedure SetHostAddr(v: String);
+    procedure SetHostName(v: String);
+    function GetLogin: String;
+    function GetPassword: String;
+    procedure SetLogin(v: String);
+    procedure SetPassword(v: String);
+    function GetGuild: String;
+    procedure SetGuild(v: String);
   end;
 
 var
@@ -114,23 +169,363 @@ var
 function Split(s: String; field: Integer): String; overload;
 function Split(s: String; field: Integer; separator: String): String; overload;
 
+procedure Navigate(url: String);
 
 implementation
 
-uses StrUtils, NewGuy, Math, Config, Front, PasZLib;
+uses StrUtils, NewGuy, Math, Config, Front, ZStream, LCLIntf;
 
 {$R *.lfm}
+
+procedure CopyFileContents(const SourceFileName, DestFileName: String);
+var
+  SourceStream: TFileStream;
+  DestStream: TFileStream;
+begin
+  SourceStream := TFileStream.Create(SourceFileName, fmOpenRead or fmShareDenyWrite);
+  try
+    DestStream := TFileStream.Create(DestFileName, fmCreate);
+    try
+      DestStream.CopyFrom(SourceStream, 0);
+    finally
+      DestStream.Free;
+    end;
+  finally
+    SourceStream.Free;
+  end;
+end;
+
+procedure WriteStringList(Writer: TWriter; Strings: TStrings);
+var
+  i: Integer;
+begin
+  Writer.WriteInteger(Strings.Count);
+  for i := 0 to Strings.Count - 1 do
+    Writer.WriteString(Strings[i]);
+end;
+
+procedure ReadStringList(Reader: TReader; Strings: TStrings);
+var
+  i, Count: Integer;
+begin
+  Strings.Clear;
+  Count := Reader.ReadInteger;
+  for i := 1 to Count do
+    Strings.Add(Reader.ReadString);
+end;
+
+procedure WriteListView(Writer: TWriter; List: TListView);
+var
+  i, j: Integer;
+  Item: TListItem;
+begin
+  Writer.WriteString(List.Hint);
+  Writer.WriteInteger(List.Tag);
+  Writer.WriteInteger(List.Items.Count);
+  for i := 0 to List.Items.Count - 1 do begin
+    Item := List.Items[i];
+    Writer.WriteString(Item.Caption);
+    Writer.WriteInteger(Item.StateIndex);
+    Writer.WriteInteger(Item.SubItems.Count);
+    for j := 0 to Item.SubItems.Count - 1 do
+      Writer.WriteString(Item.SubItems[j]);
+  end;
+end;
+
+procedure ReadListView(Reader: TReader; List: TListView);
+var
+  i, j, Count, SubCount: Integer;
+  Item: TListItem;
+begin
+  List.Hint := Reader.ReadString;
+  List.Tag := Reader.ReadInteger;
+  Count := Reader.ReadInteger;
+  List.Items.BeginUpdate;
+  try
+    List.Items.Clear;
+    for i := 1 to Count do begin
+      Item := List.Items.Add;
+      Item.Caption := Reader.ReadString;
+      Item.StateIndex := Reader.ReadInteger;
+      SubCount := Reader.ReadInteger;
+      for j := 1 to SubCount do
+        Item.SubItems.Add(Reader.ReadString);
+    end;
+  finally
+    List.Items.EndUpdate;
+  end;
+end;
+
+procedure WriteCheckListBox(Writer: TWriter; List: TCheckListBox);
+var
+  i: Integer;
+begin
+  Writer.WriteString(List.Hint);
+  Writer.WriteInteger(List.Tag);
+  Writer.WriteInteger(List.Items.Count);
+  for i := 0 to List.Items.Count - 1 do begin
+    Writer.WriteString(List.Items[i]);
+    Writer.WriteBoolean(List.Checked[i]);
+  end;
+end;
+
+procedure ReadCheckListBox(Reader: TReader; List: TCheckListBox);
+var
+  i, Count, Index: Integer;
+begin
+  List.Hint := Reader.ReadString;
+  List.Tag := Reader.ReadInteger;
+  Count := Reader.ReadInteger;
+  List.Items.BeginUpdate;
+  try
+    List.Items.Clear;
+    for i := 1 to Count do begin
+      Index := List.Items.Add(Reader.ReadString);
+      List.Checked[Index] := Reader.ReadBoolean;
+    end;
+    List.ItemIndex := -1;
+  finally
+    List.Items.EndUpdate;
+  end;
+end;
+
+procedure WriteProgressBar(Writer: TWriter; Bar: TProgressBar);
+begin
+  Writer.WriteInteger(Bar.Max);
+  Writer.WriteInteger(Bar.Position);
+  Writer.WriteString(Bar.Hint);
+end;
+
+procedure ReadProgressBar(Reader: TReader; Bar: TProgressBar);
+begin
+  Bar.Max := Reader.ReadInteger;
+  if Bar.Max < 0 then
+    Bar.Max := 0;
+  Bar.Position := EnsureRange(Reader.ReadInteger, 0, Bar.Max);
+  Bar.Hint := Reader.ReadString;
+end;
+
+procedure TMainForm.WriteSaveData(Stream: TStream);
+var
+  Writer: TWriter;
+begin
+  Stream.WriteBuffer(PChar(kSaveSignature)^, Length(kSaveSignature));
+  Writer := TWriter.Create(Stream, 4096);
+  try
+    Writer.WriteInteger(kSaveVersion);
+
+    WriteListView(Writer, Traits);
+    WriteListView(Writer, Stats);
+    WriteListView(Writer, Equips);
+    WriteListView(Writer, Spells);
+    WriteListView(Writer, Inventory);
+    WriteCheckListBox(Writer, Plots);
+    WriteCheckListBox(Writer, Quests);
+
+    WriteProgressBar(Writer, QuestBar);
+    WriteProgressBar(Writer, PlotBar);
+    WriteProgressBar(Writer, ExpBar);
+    WriteProgressBar(Writer, TaskBar);
+    WriteProgressBar(Writer, EncumBar);
+
+    Writer.WriteString(Label1.Hint);
+    Writer.WriteInteger(InventoryLabelAlsoGameStyle.Tag);
+    Writer.WriteString(Kill.SimpleText);
+    Writer.WriteString(fTask.Caption);
+    Writer.WriteString(fQuest.Caption);
+    Writer.WriteInteger(fQuest.Tag);
+    WriteStringList(Writer, fQueue.Items);
+  finally
+    Writer.Free;
+  end;
+end;
+
+procedure TMainForm.ReadSaveData(Stream: TStream);
+var
+  Reader: TReader;
+  Signature: String;
+  Version: Integer;
+begin
+  Signature := '';
+  SetLength(Signature, Length(kSaveSignature));
+  if Stream.Size - Stream.Position < Length(kSaveSignature) then
+    raise Exception.Create('Save file is incomplete.');
+  Stream.ReadBuffer(PChar(Signature)^, Length(kSaveSignature));
+  if Signature <> kSaveSignature then begin
+    if Copy(Signature, 1, 4) = 'TPF0' then
+      raise Exception.Create('Legacy Delphi component save files are no longer supported.')
+    else
+      raise Exception.Create('Unknown save file format.');
+  end;
+
+  Reader := TReader.Create(Stream, 4096);
+  try
+    Version := Reader.ReadInteger;
+    if Version <> kSaveVersion then
+      raise Exception.CreateFmt('Unsupported save version %d. Saves from earlier Lazarus builds are no longer supported.', [Version]);
+
+    ReadListView(Reader, Traits);
+    ReadListView(Reader, Stats);
+    ReadListView(Reader, Equips);
+    ReadListView(Reader, Spells);
+    ReadListView(Reader, Inventory);
+    FUpdatingHistoryLists := True;
+    try
+      ReadCheckListBox(Reader, Plots);
+      ReadCheckListBox(Reader, Quests);
+    finally
+      FUpdatingHistoryLists := False;
+    end;
+
+    ReadProgressBar(Reader, QuestBar);
+    ReadProgressBar(Reader, PlotBar);
+    ReadProgressBar(Reader, ExpBar);
+    ReadProgressBar(Reader, TaskBar);
+    ReadProgressBar(Reader, EncumBar);
+
+    Label1.Hint := Reader.ReadString;
+    InventoryLabelAlsoGameStyle.Tag := Reader.ReadInteger;
+    Kill.SimpleText := Reader.ReadString;
+    fTask.Caption := Reader.ReadString;
+    fQuest.Caption := Reader.ReadString;
+    fQuest.Tag := Reader.ReadInteger;
+    ReadStringList(Reader, fQueue.Items);
+  finally
+    Reader.Free;
+  end;
+end;
+
+procedure TMainForm.SetHistoryEntryChecked(List: TCheckListBox; Index: Integer; IsChecked: Boolean);
+begin
+  if (Index < 0) or (Index >= List.Items.Count) then Exit;
+  FUpdatingHistoryLists := True;
+  try
+    List.Checked[Index] := IsChecked;
+  finally
+    FUpdatingHistoryLists := False;
+  end;
+end;
+
+procedure TMainForm.AddHistoryEntry(List: TCheckListBox; const EntryText: String; IsChecked: Boolean);
+var
+  Index: Integer;
+begin
+  Index := List.Items.Add(EntryText);
+  SetHistoryEntryChecked(List, Index, IsChecked);
+  List.ItemIndex := -1;
+  if Index >= 0 then
+    List.TopIndex := Index;
+end;
+
+function TMainForm.LastHistoryEntry(List: TCheckListBox): String;
+begin
+  if List.Items.Count = 0
+  then Result := ''
+  else Result := List.Items[List.Items.Count - 1];
+end;
+
+procedure TMainForm.HistoryListClickCheck(Sender: TObject);
+var
+  List: TCheckListBox;
+  Index: Integer;
+  WasChecked: Boolean;
+begin
+  if FUpdatingHistoryLists then Exit;
+  List := TCheckListBox(Sender);
+  if List = FHistoryClickList
+  then Index := FHistoryClickIndex
+  else Index := List.ItemIndex;
+  if Index < 0 then Exit;
+  if (List = FHistoryClickList) and (Index < List.Items.Count)
+  then WasChecked := FHistoryClickChecked
+  else WasChecked := not List.Checked[Index];
+  FUpdatingHistoryLists := True;
+  try
+    List.Checked[Index] := WasChecked;
+  finally
+    FUpdatingHistoryLists := False;
+    FHistoryClickList := nil;
+    FHistoryClickIndex := -1;
+  end;
+end;
+
+procedure TMainForm.HistoryListMouseDown(Sender: TObject; Button: TMouseButton;
+  Shift: TShiftState; X, Y: Integer);
+var
+  List: TCheckListBox;
+  Index: Integer;
+begin
+  if Button <> mbLeft then Exit;
+  List := TCheckListBox(Sender);
+  Index := List.GetIndexAtXY(X, Y);
+  if (Index >= 0) and (Index < List.Items.Count) then begin
+    FHistoryClickList := List;
+    FHistoryClickIndex := Index;
+    FHistoryClickChecked := List.Checked[Index];
+  end else begin
+    FHistoryClickList := nil;
+    FHistoryClickIndex := -1;
+  end;
+end;
+
+procedure TMainForm.MinimizeIt;
+begin
+  if not FMinToTray then Exit;
+  if not Assigned(FTrayIcon) then Exit;
+  FTrayIcon.Hint := Caption;
+  FTrayIcon.Icon.Assign(Application.Icon);
+  FTrayIcon.Visible := True;
+  Hide;
+end;
+
+procedure TMainForm.RestoreIt;
+begin
+  if Assigned(FTrayIcon) then
+    FTrayIcon.Visible := False;
+  Application.Restore;
+  Show;
+  if WindowState = wsMinimized then
+    WindowState := wsNormal;
+  BringToFront;
+end;
 
 procedure StartTimer;
 begin
   if not MainForm.Timer1.Enabled then begin
-    MainForm.Timer1.Tag := gettickcount64;
-    //Shell_NotifyIcon(NIM_ADD, @MainForm.FTrayIcon);
+    MainForm.FLastTick := GetTickCount64;
   end;
   MainForm.Timer1.Enabled := True;
   // BS location for this, but...
   MainForm.Caption := 'ProgressQuest - ' + ChangeFileExt(ExtractFileName(MainForm.GameSaveName), '');
 end;
+
+function TMainForm.GetPasskey: Integer; begin Result := 0; end;
+procedure TMainForm.SetPasskey(v: String);
+begin
+  Traits.Hint := '0';
+  Traits.Tag := 0;
+end;
+
+function TMainForm.GetMotto: String; begin Result := Stats.Hint; end;
+procedure TMainForm.SetMotto(v: String); begin Stats.Hint := v; end;
+
+function TMainForm.GetHostName: String; begin Result := Spells.Hint; end;
+procedure TMainForm.SetHostName(v: String); begin Spells.Hint := v; end;
+
+function TMainForm.GetHostAddr: String;
+begin
+  Result := Equips.Hint;
+end;
+procedure TMainForm.SetHostAddr(v: String); begin Equips.Hint := v; end;
+
+function TMainForm.GetLogin: String; begin Result := Inventory.Hint; end;
+procedure TMainForm.SetLogin(v: String); begin Inventory.Hint := v; end;
+
+function TMainForm.GetPassword: String; begin Result := Plots.Hint; end;
+procedure TMainForm.SetPassword(v: String); begin Plots.Hint := v; end;
+
+function TMainForm.GetGuild: String; begin Result := Label1.Hint; end;
+procedure TMainForm.SetGuild(v: String); begin Label1.Hint := v; end;
 
 procedure TMainForm.Q(s: string);
 begin
@@ -211,7 +606,7 @@ end;
 function Indefinite(s: String; qty: Integer): String;
 begin
   if qty = 1 then begin
-    if Pos(s[1], 'AEIOUÜaeiouü') > 0
+    if Pos(s[1], 'AEIOU�aeiou�') > 0
     then Result := 'an ' + s
     else Result := 'a ' + s;
   end else begin
@@ -310,15 +705,15 @@ begin
       end;
   2: begin
     nemesis := ImpressiveGuy;
-    Q('task|2|Oh sweet relief! You''ve reached the protection of the good ' + nemesis);
+    Q('task|2|Oh sweet relief! You''ve reached the kind protection of ' + nemesis);
     Q('task|3|There is rejoicing, and an unnerving encouter with ' + nemesis + ' in private');
     Q('task|2|You forget your ' + BoringItem + ' and go back to get it');
     Q('task|2|What''s this!? You overhear something shocking!');
     Q('task|2|Could ' + nemesis + ' be a dirty double-dealer?');
-    Q('task|3|Who can possibly be trusted with this news!? ... Oh yes, of course');
+    Q('task|3|Who can possibly be trusted with this news!? -- Oh yes, of course');
       end;
   end;
-  Q('plot|1|Loading');
+  Q('plot|2|Loading');
 end;
 
 
@@ -327,6 +722,7 @@ var
   lev, i: Integer;
   m: String;
 begin
+  Result := '';
   lev := 0;  // shut up, compiler hint
   for i := 1 to 5 do begin
     m := Pick(K.Monsters.Lines);
@@ -342,8 +738,8 @@ function TMainForm.ImpressiveGuy: String;
 begin
   Result := Pick(K.ImpressiveTitles.Lines);
   case Random(2) of
-  0: Result := Result + ' of the ' + Pick(K.Races.Lines);
-  1: Result := Result + ' of ' + GenerateName;
+  0: Result := 'the ' + Result + ' of the ' + Plural(Split(Pick(K.Races.Lines), 0));
+  1: Result := Result + ' ' + GenerateName + ' of ' + GenerateName;
   end;
 end;
 
@@ -484,7 +880,7 @@ begin
       if (a = 'task') or (a = 'plot') then begin
         if a = 'plot' then begin
           CompleteAct;
-          s := 'Loading ' + Plots.Items[Plots.Items.Count-1].Caption;
+          s := 'Loading ' + LastHistoryEntry(Plots);
         end;
         Task(s, n * 1000);
         fQueue.Items.Delete(0);
@@ -550,17 +946,19 @@ begin
     if SubItems.Count < 1
     then SubItems.Add(value)
     else SubItems[0] := value;
+
+    Selected := true;
+    MakeVisible(false);
   end;
   //list.MultiSelect := true;
   //list.RowSelect := true;
   //list.HideSelection := false;
-  list.Items[pos].Selected := true;
 end;
 
 function LevelUpTime(level: Integer): Integer;  // seconds
 begin
-  // 20 minutes per level
-  Result := 20 * level * 60;
+ // ~20 minutes for level 1, eventually dominated by exponential
+ Result := Round((20.0 + IntPower(1.15,level)) * 60.0);
 end;
 
 procedure TMainForm.GoButtonClick(Sender: TObject);
@@ -570,39 +968,23 @@ begin
     Max := LevelUpTime(1);
   end;
 
-  fTask.Caption := '';
+  fTask.Caption := 'load';
   fQuest.Caption := '';
   fQueue.Items.Clear;
 
-  Task('Loading.',2000); // that dot is spotted for later...
+  Task('Loading',2000);
   Q('task|10|Experiencing an enigmatic and foreboding night vision');
   Q('task|6|Much is revealed about that wise old bastard you''d underestimated');
   Q('task|6|A shocking series of events leaves you alone and bewildered, but resolute');
   Q('task|4|Drawing upon an unexpected reserve of determination, you set out on a long and dangerous journey');
-  Q('task|2|Loading');
+  Q('plot|2|Loading');
 
   PlotBar.Max := 26;
-  with Plots.Items.Add do begin
-    Caption := 'Prologue';
-    Checked := False;
-  end;
+  AddHistoryEntry(Plots, 'Prologue', False);
 
   StartTimer;
   SaveGame;
-end;
-
-procedure TMainForm.QuestsItemChecked(Sender: TObject; Item: TListItem);
-begin  
-  Quests.OnItemChecked := nil;
-  Item.Checked := not Item.Checked;
-  Quests.OnItemChecked := PlotsItemChecked;
-end;
-
-procedure TMainForm.PlotsItemChecked(Sender: TObject; Item: TListItem);
-begin
-  Plots.OnItemChecked := nil;
-  Item.Checked := not Item.Checked;
-  Plots.OnItemChecked := PlotsItemChecked;
+  Brag('s');
 end;
 
 procedure TMainForm.WinSpell;
@@ -669,20 +1051,53 @@ end;
 
 procedure TMainForm.WinStat;
 var
-  i,t: Integer;
-  function Square(x: Integer): Integer; begin Result := x * x; end;
+  i: Integer;
+  t: Int64;
+  function Square(x: Int64): Int64; begin Result := x * x; end;
+
+  function Random64: Int64; overload;
+  begin
+    Int64Rec(Result).Hi := Random($3FFFFFFF);
+    Int64Rec(Result).Lo := Random($FFFFFFFF);
+  end;
+
+  function Random64(below: Int64): Int64; overload;
+  begin
+    Result := Random64 mod below;
+  end;
+
+{
+  procedure TestRandom;
+  var
+    i, b: Integer;
+    c: Integer;
+    v: Int64;
+  begin
+    for b := 0 to 63 do begin
+      c := 0;
+      for i := 1 to 1000 do begin
+        v := Random64($0fffffffffffffff);
+        if ((v shr b) and 1) = 1 then Inc(c);
+      end;
+      OutputDebugString(PChar(IntToStr(b) + ' ' + IntToStr(c) + '\n'));
+    end
+  end;
+}
+
 begin
+  // TestRandom;
+
   if Odds(1,2)
   then i := Random(Stats.Items.Count)
   else begin
-    // favor the best stat so it will tend to clump
+    // Favor the best stats so they will tend to clump
     t := 0;
-    for i := 0 to 5 do Inc(t,Square(GetI(Stats,i)));
-    t := Random(t);
+    for i := 0 to 5 do Inc(t, Square(GetI(Stats,i)));
+    t := Random64(t);
     i := -1;
     while t >= 0 do begin
       Inc(i);
-      Dec(t,Square(GetI(Stats,i)));
+      Dec(t, Square(GetI(Stats,i)));
     end;
   end;
   Add(Stats, Stats.Items[i].Caption, 1);
@@ -707,15 +1122,18 @@ end;
 
 procedure TMainForm.WinItem;
 begin
-  Add(Inventory, SpecialItem, 1);
+  if max(250, Random(999)) < Inventory.Items.Count
+  then Add(Inventory, Inventory.Items[Random(Inventory.Items.Count)].Caption, 1)
+  else Add(Inventory, SpecialItem, 1);
 end;
 
 procedure TMainForm.CompleteQuest;
 var
   lev, level, l, i, montag: Integer;
-  m: string;
+  m, QuestText: string;
 begin
   lev := 0;  // Quell stupid compiler warning
+  QuestText := '';
   with QuestBar do begin
     Position := 0;
     Max := 50 + Random(100);
@@ -723,9 +1141,9 @@ begin
   with Quests do begin
     if Items.Count > 0 then begin
       {$IFDEF LOGGING}
-      Log('Quest completed: ' + Items[Items.Count-1].Caption);
+      Log('Quest completed: ' + LastHistoryEntry(Quests));
       {$ENDIF}
-      Items[Items.Count-1].Checked := TRUE;
+      SetHistoryEntryChecked(Quests, Items.Count - 1, True);
       case Random(4) of
         0: WinSpell;
         1: WinEquip;
@@ -735,59 +1153,55 @@ begin
     end;
     while Items.Count > 99 do Items.Delete(0);
 
-    with Items.Add do begin
-      case Random(5) of
-        0: begin
-          level := GetI(Traits,'Level');
-          for i := 1 to 4 do begin
-            montag := Random(K.Monsters.Lines.Count);
-            m := K.Monsters.Lines[montag];
-            l := StrToInt(Split(m,1));
-            if (i = 1) or (abs(l - level) < abs(lev - level)) then begin
-              lev := l;
-              fQuest.Caption := m;
-              fQuest.Tag := montag;
-            end;
+    case Random(5) of
+      0: begin
+        level := GetI(Traits,'Level');
+        for i := 1 to 4 do begin
+          montag := Random(K.Monsters.Lines.Count);
+          m := K.Monsters.Lines[montag];
+          l := StrToInt(Split(m,1));
+          if (i = 1) or (abs(l - level) < abs(lev - level)) then begin
+            lev := l;
+            fQuest.Caption := m;
+            fQuest.Tag := montag;
           end;
-          Caption := 'Exterminate ' + Definite(Split(fQuest.Caption,0),2);
         end;
-        1: begin
-          fQuest.Caption := InterestingItem;
-          Caption := 'Seek ' + Definite(fQuest.Caption,1);
-          fQuest.Caption := '';
-        end;
-        2: begin
-          fQuest.Caption := BoringItem;
-          Caption := 'Deliver this ' + fQuest.Caption;
-          fQuest.Caption := '';
-        end;
-        3: begin
-          fQuest.Caption := BoringItem;
-          Caption := 'Fetch me ' + Indefinite(fQuest.Caption,1);
-          fQuest.Caption := '';
-        end;
-        4: begin
-          level := GetI(Traits,'Level');
-          for i := 1 to 2 do begin
-            montag := Random(K.Monsters.Lines.Count);
-            m := K.Monsters.Lines[montag];
-            l := StrToInt(Split(m,1));
-            if (i = 1) or (abs(l - level) < abs(lev - level)) then begin
-              lev := l;
-              fQuest.Caption := m;
-            end;
-          end;
-          Caption := 'Placate ' + Definite(Split(fQuest.Caption,0),2);
-          fQuest.Caption := '';
-        end;
+        QuestText := 'Exterminate ' + Definite(Split(fQuest.Caption,0),2);
       end;
-      {$IFDEF LOGGING}
-      Log('Commencing quest: ' + Caption);
-      {$ENDIF}
-      Checked := False;
-      MakeVisible(false);
+      1: begin
+        fQuest.Caption := InterestingItem;
+        QuestText := 'Seek ' + Definite(fQuest.Caption,1);
+        fQuest.Caption := '';
+      end;
+      2: begin
+        fQuest.Caption := BoringItem;
+        QuestText := 'Deliver this ' + fQuest.Caption;
+        fQuest.Caption := '';
+      end;
+      3: begin
+        fQuest.Caption := BoringItem;
+        QuestText := 'Fetch me ' + Indefinite(fQuest.Caption,1);
+        fQuest.Caption := '';
+      end;
+      4: begin
+        level := GetI(Traits,'Level');
+        for i := 1 to 2 do begin
+          montag := Random(K.Monsters.Lines.Count);
+          m := K.Monsters.Lines[montag];
+          l := StrToInt(Split(m,1));
+          if (i = 1) or (abs(l - level) < abs(lev - level)) then begin
+            lev := l;
+            fQuest.Caption := m;
+          end;
+        end;
+        QuestText := 'Placate ' + Definite(Split(fQuest.Caption,0),2);
+        fQuest.Caption := '';
+      end;
     end;
-    Width := Width - 1; // trigger a column resize
+    {$IFDEF LOGGING}
+    Log('Commencing quest: ' + QuestText);
+    {$ENDIF}
+    AddHistoryEntry(Quests, QuestText, False);
   end;
   SaveGame;
 end;
@@ -810,9 +1224,15 @@ begin
   end;
 end;
 
+// I V  X  L   C   D    M    A     T     P      E
+// 1 5 10 50 100 500 1000 5000 10000 50000 100000
 function IntToRoman(n: Integer): String;
 begin
   Result := '';
+  while Rome(n, 10000, Result, 'T') do ;
+  Rome(n, 9000, Result, 'MT');
+  Rome(n, 5000, Result, 'A');
+  Rome(n, 4000, Result, 'MA');
   while Rome(n, 1000, Result, 'M') do ;
   Rome(n, 900, Result, 'CM');
   Rome(n, 500, Result, 'D');
@@ -831,6 +1251,10 @@ end;
 function RomanToInt(n: String): Integer;
 begin
   Result := 0;
+  while UnRome(n, 10000, Result, 'T') do ;
+  UnRome(n, 9000, Result, 'MT');
+  UnRome(n, 5000, Result, 'A');
+  UnRome(n, 4000, Result, 'MA');
   while UnRome(n, 1000, Result, 'M') do ;
   UnRome(n, 900, Result, 'CM');
   UnRome(n, 500, Result, 'D');
@@ -850,19 +1274,15 @@ procedure TMainForm.CompleteAct;
 begin
   PlotBar.Position := 0;
   with Plots do begin
-    Items[Items.Count-1].Checked := True;
+    SetHistoryEntryChecked(Plots, Items.Count - 1, True);
     PlotBar.Max := 60 * 60 * (1 + 5 * Items.Count); // 1 hr + 5/act
     PlotBar.Hint := 'Cutscene omitted';
-    with Items.Add do begin
-      Caption := 'Act ' + IntToRoman(Items.Count-1);
-      MakeVisible(false);
-      Checked := False;
-      Width := Width-1;
-    end;
+    AddHistoryEntry(Plots, 'Act ' + IntToRoman(Items.Count), False);
+    if Items.Count > 2 then WinItem;
+    if Items.Count > 3 then WinEquip;
   end;
-  WinItem;
-  WinEquip;
   SaveGame;
+  Brag('a');
 end;
 
 
@@ -904,16 +1324,19 @@ var
   procedure WrLn(a: String); overload; begin Wr(a + #13#10); end;
   procedure WrLn; overload; begin Wr(#13#10); end;
 begin
+  f := '';
   Wr(Get(Traits,'Name'));
+  if GetHostName <> '' then
+    Wr(' [' + GetHostName + ']');
   WrLn;
   WrLn(Get(Traits,'Race') + ' ' +  Get(Traits,'Class'));
   WrLn(Format('Level %d (exp. %d/%d)', [GetI(Traits,'Level'), ExpBar.Position, ExpBar.Max]));
   //WrLn('Level ' + Get(Traits,'Level') + ' (' + ExpBar.Hint + ')');
   WrLn;
   with Plots do if Items.Count > 0 then
-    WrLn('Plot stage: ' + Items[Items.Count-1].Caption + ' (' + PlotBar.Hint + ')');
+    WrLn('Plot stage: ' + LastHistoryEntry(Plots) + ' (' + PlotBar.Hint + ')');
   with Quests do if Items.Count > 0 then
-    WrLn('Quest: ' + Items[Items.Count-1].Caption + ' (' + QuestBar.Hint + ')');
+    WrLn('Quest: ' + LastHistoryEntry(Quests) + ' (' + QuestBar.Hint + ')');
   WrLn;
   WrLn( 'Stats:');
   WrLn( Format('  STR%7d', [GetI(Stats,'STR')]));
@@ -924,7 +1347,7 @@ begin
   WrLn( Format('  CHA%7d      MP Max%7d', [GetI(Stats,'CHA'), GetI(Stats,'MP Max')]));
   WrLn;
   WrLn( 'Equipment:');
-  for i := 1 to Equips.Items.Count-1 do
+  for i := 0 to Equips.Items.Count-1 do
     if Get(Equips,i) <> '' then
       WrLn( '  ' + LeftStr(Equips.Items[i].Caption + '            ', 12) + Get(Equips,i));
   WrLn;
@@ -942,7 +1365,7 @@ begin
       else WrLn( '  ' + Indefinite(Items[i].Caption, GetI(Inventory,i)));
   WrLn;
   WrLn( '-- ' + DateTimeToStr(Now));
-  WrLn( '-- Progress Quest 6.2 - http://progressquest.com/');
+  WrLn( '-- Progress Quest 6.4 - http://progressquest.com/');
   Result := f;
 end;
 
@@ -1039,6 +1462,7 @@ begin
     Max := LevelUpTime(GetI(Traits,'Level'));
   end;
   SaveGame;
+  Brag('l');
 end;
 
 procedure TMainForm.ClearAllSelections;
@@ -1048,8 +1472,8 @@ begin
       Stats.ClearSelection;
       Traits.ClearSelection;
       Inventory.ClearSelection;
-      Plots.ClearSelection;
-      Quests.ClearSelection;
+      Plots.ItemIndex := -1;
+      Quests.ItemIndex := -1;
 end;
 
 function RoughTime(s: Integer): String;
@@ -1063,14 +1487,15 @@ end;
 procedure TMainForm.Timer1Timer(Sender: TObject);
 var
   gain: Boolean;
-  elapsed: Integer;
+  elapsed: QWord;
 begin
   gain := Pos('kill|',fTask.Caption) = 1;
   with TaskBar do begin
+    {$IFDEF TURBO}
+    Position := Max;
+    {$ENDIF}
     if Position >= Max then begin
       ClearAllSelections;
-
-      if Kill.SimpleText = 'Loading....' then Max := 0;
 
       // gain XP / level up
       if gain then with ExpBar do if Position >= Max
@@ -1087,9 +1512,10 @@ begin
       end;
 
       // advance plot
-      if gain then with PlotBar do if Position >= Max
+      if (PlotBar.Position >= PlotBar.Max) and gain
       then InterplotCinematic
-      else Position := Position + TaskBar.Max div 1000;
+      else if fTask.Caption <> 'load'
+      then PlotBar.Position := Math.Min(PlotBar.Position + TaskBar.Max div 1000, PlotBar.Max);
 
       //Time.Caption := FormatDateTime('h:mm:ss',PlotBar.Position / (24.0 * 60 * 60));
       PlotBar.Hint := RoughTime(PlotBar.Max-PlotBar.Position) + ' remaining';
@@ -1097,13 +1523,12 @@ begin
 
       Dequeue();
     end else with TaskBar do begin
-      elapsed := LongInt(gettickcount64) - LongInt(Timer1.Tag);
+      elapsed := GetTickCount64 - FLastTick;
       if elapsed > 100 then elapsed := 100;
-      if elapsed < 0 then elapsed := 0;
       Position := Position + elapsed;
     end;
   end;
-  Timer1.Tag := gettickcount64;
+  FLastTick := GetTickCount64;
 end;
 
 procedure TMainForm.FormCreate(Sender: TObject);
@@ -1117,19 +1542,36 @@ begin
   FReportSave := true;
   FLogEvents := false;
   FMakeBackups := true;
+  FMinToTray := true;
   FExportSheets := false;
+  FLastTick := 0;
+  FUpdatingHistoryLists := False;
+  FHistoryClickIndex := -1;
+  FHistoryClickList := nil;
 
-  { Fix a macOS bundle issue }
-  WorkDir := '.';
-  if GetCurrentDir = '/' then begin
-     ShowMessage('You have to choose a working directory to store save files.');
-     with TSelectDirectoryDialog.Create(nil) do
-       try
-          if Execute then
-             WorkDir := FileName;
-       finally
-       end;
-  end;
+  FTrayIcon := TTrayIcon.Create(Self);
+  FTrayIcon.Visible := False;
+  FTrayIcon.Hint := Application.Title;
+  FTrayIcon.Icon.Assign(Application.Icon);
+  FTrayIcon.OnClick := TrayIconClick;
+
+  Plots.TabStop := False;
+  Plots.OnMouseDown := HistoryListMouseDown;
+  Plots.OnClickCheck := HistoryListClickCheck;
+  Plots.ItemIndex := -1;
+  Quests.TabStop := False;
+  Quests.OnMouseDown := HistoryListMouseDown;
+  Quests.OnClickCheck := HistoryListClickCheck;
+  Quests.ItemIndex := -1;
+
+  OnWindowStateChange := FormWindowStateChange;
+end;
+
+procedure TMainForm.SpeedButton1Click(Sender: TObject);
+begin
+  {$IFDEF CHEATS}
+  TaskBar.Position := TaskBar.Max;
+  {$ENDIF}
 end;
 
 function TMainForm.RollCharacter: Boolean;
@@ -1180,7 +1622,7 @@ end;
 
 const
   KUsage =
-    'Usage: pq [flags] [game.pq3]'#10 +
+    'Usage: pq [flags] [game.pq]'#10 +
     #10 +
     'Flags:'#10 +
     '  -no-backup     Do not make a backup file when saving the game'#10 +
@@ -1188,6 +1630,7 @@ const
     '  -log           Create a text log of events as they occur in the game'#10 +
     {$ENDIF}
     '  -no-report-save   Do not display the "Game saved" message when saving'#10 +
+    '  -no-tray       Do not minimize to the system tray'#10 +
     '  -export        Export a text character sheet periodically'#10 +
     '  -export-only   Export a text character sheet now, then exit'#10 +
     '  -help          Display this chatter (and exit)'#10 ;
@@ -1209,6 +1652,8 @@ begin
     {$ENDIF}
     else if ParamStr(i) = '-no-report-save'
     then FReportSave := false
+    else if ParamStr(i) = '-no-tray'
+    then FMinToTray := false
     else if ParamStr(i) = '-export'
     then FExportSheets := true
     else if ParamStr(i) = '-export-only'
@@ -1229,6 +1674,10 @@ begin
     end;
   end;
   while not Done do begin
+    SetHostName('');
+    SetHostAddr('');
+    SetLogin('');
+    SetPassword('');
     case FrontForm.ShowModal of
     mrOk: begin
         done := RollCharacter;
@@ -1248,21 +1697,56 @@ begin
   end;
 end;
 
+procedure TMainForm.Button1Click(Sender: TObject);
+begin
+  {$IFDEF CHEATS}
+  LevelUp;
+  {$ENDIF}
+end;
+
+procedure TMainForm.CashInClick(Sender: TObject);
+begin
+  {$IFDEF CHEATS}
+  WinEquip;
+  WinItem;
+  WinSpell;
+  WinStat;
+  Add(Inventory,'Gold',Random(100));
+  {$ENDIF}
+end;
+
+procedure TMainForm.FinishQuestClick(Sender: TObject);
+begin
+  {$IFDEF CHEATS}
+  QuestBar.Position := QuestBar.Max;
+  TaskBar.Position := TaskBar.Max;
+  {$ENDIF}
+end;
+
+procedure TMainForm.CheatPlotClick(Sender: TObject);
+begin
+  {$IFDEF CHEATS}
+  PlotBar.Position := PlotBar.Max;
+  TaskBar.Position := TaskBar.Max;
+  {$ENDIF}
+end;
+
 function TMainForm.SaveGame: Boolean;
 var
   f: TFileStream;
   m: TMemoryStream;
-  i: Integer;
+  compressor: TCompressionStream;
+  backupName: String;
 begin
   {$IFDEF LOGGING}
   Log('Saving game: ' + GameSaveName);
   {$ENDIF}
   Result := true;
-
   try
-    if FMakeBackups then begin
-      DeleteFile(ChangeFileExt(GameSaveName, '.bak'));
-      RenameFile(PChar(GameSaveName), PChar(ChangeFileExt(GameSaveName, '.bak')));
+    if FMakeBackups and FileExists(GameSaveName) then begin
+      backupName := ChangeFileExt(GameSaveName, '.bak');
+      DeleteFile(backupName);
+      CopyFileContents(GameSaveName, backupName);
     end;
     f := TFileStream.Create(GameSaveName, fmCreate);
   except
@@ -1272,42 +1756,61 @@ begin
     end;
   end;
 
-
-  //ClearAllSelections;
   m := TMemoryStream.Create;
-  for i := 0 to ComponentCount-1 do
-    m.WriteComponent(Components[i]);
-  m.WriteComponent(MainForm);
-  m.Seek(0, soFromBeginning);
-  //ZCompressStream(m, f);
-  f.Write(m, m.Size);
-  m.Free;
-  f.Free;
+  try
+    WriteSaveData(m);
+    m.Seek(0, soFromBeginning);
+    compressor := TCompressionStream.Create(cldefault, f);
+    try
+      compressor.CopyFrom(m, 0);
+      compressor.Flush;
+    finally
+      compressor.Free;
+    end;
+  finally
+    m.Free;
+    f.Free;
+  end;
 end;
 
 procedure TMainForm.LoadGame(name: String);
 var
   f: TStream;
   m: TStream;
+  decompressor: TDecompressionStream;
   i: Integer;
 begin
   FSaveFileName := name;
   m := TMemoryStream.Create;
   f := TFileStream.Create(name, fmOpenRead);
   try
-    //ZDecompressStream(f, m);
-    m.Write(f, f.Size);
+    try
+      decompressor := TDecompressionStream.Create(f);
+      try
+        m.CopyFrom(decompressor, 0);
+      finally
+        decompressor.Free;
+      end;
+      m.Seek(0, soFromBeginning);
+      ReadSaveData(m);
+    except
+      on E: Exception do begin
+        ShowMessage('Error loading game: ' + E.Message);
+        Exit;
+      end;
+    end;
+  finally
     f.Free;
-  except
-
+    m.Free;
   end;
-  Traits.Items.Clear;
-  Stats.Items.Clear;
-  Equips.Items.Clear;
-  m.Seek(0, soFromBeginning);
-  for i := 0 to ComponentCount-1 do
-    m.ReadComponent(Components[i]);
-  m.Free;
+
+  // Patch old misspellings found in save
+  with Spells do for i := 1 to Items.Count-1 do begin
+    if Items[i].Caption = 'Tonsilectomy' then
+      Items[i].Caption := 'Tonsillectomy';
+    if Items[i].Caption = 'Innoculate' then
+      Items[i].Caption := 'Inoculate';
+  end;
   {$IFDEF LOGGING}
   Log('Loaded game: ' + name);
   {$ENDIF}
@@ -1317,8 +1820,6 @@ end;
 
 procedure TMainForm.TriggerAutosizes;
 begin
-  Plots.Width := 100;
-  Quests.Width := 100;
   Inventory.Width := 100;
   Equips.Width := 100;
   Spells.Width := 100;
@@ -1330,6 +1831,8 @@ procedure TMainForm.FormClose(Sender: TObject; var Action: TCloseAction);
 begin
   if Timer1.Enabled then begin
     Timer1.Enabled := false;
+    if Assigned(FTrayIcon) then
+      FTrayIcon.Visible := False;
     if SaveGame then
       if FReportSave then
         ShowMessage('Game saved as ' + GameSaveName);
@@ -1342,8 +1845,10 @@ function TMainForm.GameSaveName: String;
 begin
   if FSaveFileName = '' then begin
     FSaveFileName := Get(Traits,'Name');
+    if GetHostName <> '' then
+      FSaveFileName := FSaveFileName + ' [' + GetHostName + ']';
     FSaveFileName := FSaveFileName + kFileExt;
-    FSaveFileName := ExpandFileName(PChar(WorkDir + PathDelim + FSaveFileName));
+    FSaveFileName := ExpandFileName(PChar(FSaveFileName));
   end;
   Result := FSaveFileName;
 end;
@@ -1351,12 +1856,66 @@ end;
 procedure TMainForm.FormKeyDown(Sender: TObject; var Key: Word;
   Shift: TShiftState);
 begin
+  {$IFDEF CHEATS}
+  if (ssCtrl in Shift) and (ssShift in Shift) and (Key = ord('C')) then begin
+    Cheats.Visible := not Cheats.Visible;
+  end;
+  {$ENDIF}
   if (ssCtrl in Shift) and (Key = ord('A')) then begin
     ShowMessage(CharSheet);
   end;
 end;
 
+procedure TMainForm.FormWindowStateChange(Sender: TObject);
+begin
+  if (WindowState = wsMinimized) and FMinToTray then
+    MinimizeIt;
+end;
+
+procedure TMainForm.TrayIconClick(Sender: TObject);
+begin
+  RestoreIt;
+end;
+
+procedure Navigate(url: String);
+begin
+  OpenURL(url);
+end;
+
+function LFSR(pt: String; salt: Integer): Integer;
+var
+  k: Integer;
+begin
+  Result := salt;
+  for k := 1 to Length(pt) do
+    Result := Ord(pt[k])
+          xor (Result shl 1)
+          xor (1 and ((Result shr 31) xor (Result shr 5)));
+  for k := 1 to 10 do
+    Result := (Result shl 1)
+          xor (1 and ((Result shr 31) xor (Result shr 5)));
+end;
+
+
+procedure TMainForm.Brag(trigger: String);
+begin
+  if FExportSheets then
+    ExportCharSheet;
+end;
+
+function TMainForm.AuthenticateUrl(url: String): String;
+begin
+  Result := url;
+end;
+
+procedure TMainForm.Guildify;
+begin
+  // Multiplayer support was removed for the Lazarus port.
+end;
+
 initialization
   RegisterClasses([TMainForm]);
 end.
+
+
 

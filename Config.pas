@@ -1,6 +1,8 @@
 unit Config;
 { copyright (c)2002 Eric Fredricksen all rights reserved }
 
+{$mode delphi}{$H+}
+
 interface
 
 uses
